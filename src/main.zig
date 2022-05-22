@@ -1,6 +1,9 @@
 const std = @import("std");
 const testing = std.testing;
 
+const Vec3 = [3]f32;
+const Vec4 = [4]f32;
+
 const Token = union(enum) {
     ref: []const u8,
     literal: f64,
@@ -124,42 +127,47 @@ fn CompileExpression(comptime expression: []const u8) type {
     return ast_stack.peek();
 }
 
-fn LiteralOp(comptime f: f64) type {
+inline fn LiteralOp(comptime f: f64) type {
     return struct {
-        pub fn eval(vars: anytype) f64 {
+        pub fn eval(vars: anytype) f32 {
             _ = vars;
             return f;
         }
     };
 }
 
-fn PlusOp(comptime a: type, comptime b: type) type {
+inline fn PlusOp(comptime a: type, comptime b: type) type {
     return struct {
-        pub fn eval(vars: anytype) f64 {
-            return a.eval(vars) + b.eval(vars);
+        pub fn eval(vars: anytype) Vec3 {
+            return VecAdd(Vec3, a.eval(vars), b.eval(vars));
         }
     };
 }
 
-fn MulOp(comptime a: type, comptime b: type) type {
+inline fn MulOp(comptime a: type, comptime b: type) type {
     return struct {
-        pub fn eval(vars: anytype) f64 {
-            return a.eval(vars) * b.eval(vars);
+        pub fn eval(vars: anytype) Vec3 {
+            const be = b.eval(vars);
+            if (@TypeOf(be) == Vec3) {
+                return VecMul(Vec3, a.eval(vars), be);
+            } else if (@TypeOf(be) == f32) {
+                return VecScale(Vec3, a.eval(vars), be);
+            }
         }
     };
 }
 
-fn MinusOp(comptime a: type, comptime b: type) type {
+inline fn MinusOp(comptime a: type, comptime b: type) type {
     return struct {
-        pub fn eval(vars: anytype) f64 {
-            return a.eval(vars) - b.eval(vars);
+        pub fn eval(vars: anytype) Vec3 {
+            return VecSub(Vec3, a.eval(vars), b.eval(vars));
         }
     };
 }
 
-fn RefOp(comptime name: []const u8) type {
+inline fn RefOp(comptime name: []const u8) type {
     return struct {
-        pub fn eval(vars: anytype) f64 {
+        pub fn eval(vars: anytype) Vec3 {
             // @compileLog(vars);
             return @field(vars, name);
         }
@@ -270,16 +278,72 @@ fn tokenize(comptime str: []const u8, comptime output_buf: []Token) ![]Token {
     return output_buf[0..output_idx];
 }
 
+fn VecScale(comptime T: type, v: T, s: f32) T {
+    if (T == Vec3) {
+        return Vec3{ s * v[0], s * v[1], s * v[2] };
+    }
+}
+
+fn VecSub(comptime T: type, v1: T, v2: T) T {
+    if (T == Vec3) {
+        return Vec3{ v1[0] - v2[0], v1[1] - v2[1], v1[2] - v2[2] };
+    }
+}
+
+fn VecMul(comptime T: type, v1: T, v2: T) T {
+    if (T == Vec3) {
+        return Vec3{ v1[0] * v2[0], v1[1] * v2[1], v1[2] * v2[2] };
+    }
+}
+
+fn VecAdd(comptime T: type, v1: T, v2: T) T {
+    if (T == Vec3) {
+        return Vec3{ v1[0] + v2[0], v1[1] + v2[1], v1[2] + v2[2] };
+    }
+}
+
+export fn testFun(x_: [*]const f32, r: [*]f32) void {
+    // written as an `export fn` to make it easy to objdump and verify compact asm:
+    //   objdump -d ./zig-out/bin/zig-infix-parser | awk -F"\n" -v RS="\n\n" '$1 ~ /testFun/'
+    const x = x_[0..3].*;
+    const E = CompileExpression("(x*y)+x*3-y");
+    const y = Vec3{ 3, 4, 5 };
+    const res = E.eval(.{ .x = x, .y = y });
+    std.mem.copy(f32, r[0..3], res[0..3]);
+}
+
+pub fn main() void {
+    var rand = std.rand.DefaultPrng.init(@intCast(u64, std.time.milliTimestamp()));
+    const x = Vec3{
+        rand.random().float(f32),
+        rand.random().float(f32),
+        rand.random().float(f32),
+    };
+    var r = Vec3{ 0, 0, 0 };
+    testFun(@ptrCast([*]const f32, &x[0]), @ptrCast([*]f32, &r[0]));
+    std.debug.print("{any}\n", .{r});
+}
+
 test "parse1" {
-    const E = CompileExpression("x*(x+1)*y-3*y");
-    const x: f64 = 1.234;
-    const y: f64 = -3.456;
-    try std.testing.expect(E.eval(.{ .x = x, .y = y }) == (x * (x + 1) * y - 3 * y));
+    const E = CompileExpression("(x+y) * 4");
+    const x = Vec3{ 1, 2, 3 };
+    const y = Vec3{ 3, 4, 5 };
+    const actual = E.eval(.{ .x = x, .y = y });
+    const expected = VecScale(Vec3, VecAdd(Vec3, x, y), 4);
+    try std.testing.expect(actual[0] == expected[0]);
+    try std.testing.expect(actual[1] == expected[1]);
+    try std.testing.expect(actual[2] == expected[2]);
 }
 
 test "parse2" {
-    const E = CompileExpression("2*3");
-    try std.testing.expect(E.eval(.{}) == (2 * 3));
+    const E = CompileExpression("(x*y)+x*3-y");
+    const x = Vec3{ 1, 2, 3 };
+    const y = Vec3{ 3, 4, 5 };
+    const actual = E.eval(.{ .x = x, .y = y });
+    const expected = VecSub(Vec3, VecAdd(Vec3, VecMul(Vec3, x, y), VecScale(Vec3, x, 3)), y);
+    try std.testing.expect(actual[0] == expected[0]);
+    try std.testing.expect(actual[1] == expected[1]);
+    try std.testing.expect(actual[2] == expected[2]);
 }
 
 // Malformed expression should trigger compile error
